@@ -15,6 +15,7 @@
   - [The `sum` combinator](#the-sum-combinator)
   - [The `union` combinator](#the-union-combinator)
   - [The `lazy` combinator](#the-lazy-combinator)
+  - [The `node` combinator](#the-node-combinator)
   - [The `refine` combinator](#the-refine-combinator)
   - [The `parse` combinator](#the-parse-combinator)
 - [Extracting static types from decoders](#extracting-static-types-from-decoders)
@@ -303,6 +304,83 @@ const Bar: D.Decoder<unknown, Bar> = D.lazy('Bar', () =>
     foo: D.nullable(Foo)
   })
 )
+```
+
+## The `node` combinator
+
+The `node` combinator defines a recursive decoder with an explicit decode context. Unlike `lazy`, which only models recursive _types_, `node` also guards against cyclic _data_: when an input object back-references one of its ancestors, the decoder either fails (`onCycle: 'reject'`, the default) or resolves the reference to the decoded value of the ancestor (`onCycle: 'reference'`).
+
+The decode context is created fresh for every `decode` call, so state never leaks between consecutive decodes and the input object is never mutated.
+
+```ts
+interface Node {
+  name: string
+  self: null | Node
+}
+
+const Node: D.Decoder<unknown, Node> = D.node(
+  'Node',
+  (self) =>
+    D.struct({
+      name: D.string,
+      self: D.nullable(self)
+    }),
+  { onCycle: 'reject' } // or 'reference'
+)
+```
+
+**Shared leaves are legal** (acyclic objects shared between branches are not reported)
+
+```ts
+const shared = { name: 'shared', self: null }
+const a = { name: 'a', self: shared }
+const b = { name: 'b', self: shared }
+const root = { name: 'root', self: [a, b] }
+
+console.log(isRight(Node.decode(root))) // => true
+```
+
+**Self loops fail finitely** (reject mode)
+
+```ts
+const selfLoop: any = { name: 'a' }
+selfLoop.self = selfLoop
+
+console.log(isLeft(Node.decode(selfLoop))) // => true (no infinite loop)
+```
+
+**Two-node loops fail finitely** (reject mode)
+
+```ts
+const a: any = { name: 'a' }
+const b: any = { name: 'b' }
+a.self = b
+b.self = a
+
+console.log(isLeft(Node.decode(a))) // => true (no infinite loop)
+```
+
+**Reference mode** resolves cyclic references to the decoded value of the ancestor
+
+```ts
+const NodeReference: D.Decoder<unknown, Node> = D.node(
+  'Node',
+  (self) =>
+    D.struct({
+      name: D.string,
+      self: D.nullable(self)
+    }),
+  { onCycle: 'reference' }
+)
+
+const selfLoop: any = { name: 'a' }
+selfLoop.self = selfLoop
+
+const result = NodeReference.decode(selfLoop)
+console.log(isRight(result)) // => true
+if (isRight(result)) {
+  console.log(result.right.self === result.right) // => true
+}
 ```
 
 ## The `refine` combinator

@@ -379,6 +379,165 @@ export const lazy: <I, A>(id: string, f: () => Decoder<I, A>) => Decoder<I, A> =
   K.lazy(M)((id, e) => FS.of(DE.lazy(id, e)))
 
 /**
+ * The strategy used by {@link node} when a cyclic reference to an ancestor is detected
+ * while decoding an input value.
+ *
+ * - `reject` (default): the decode fails with an error
+ * - `reference`: the cyclic reference is resolved to the decoded value of the ancestor
+ *
+ * @category combinators
+ * @since 2.2.23
+ */
+export interface NodeOptions {
+  readonly onCycle?: 'reject' | 'reference'
+}
+
+interface Cell {
+  current: unknown
+}
+
+interface NodeContext {
+  readonly token: object
+  readonly mode: 'reject' | 'reference'
+  readonly ancestors: WeakSet<object>
+  readonly refs: WeakMap<object, Cell>
+  readonly cells: WeakSet<Cell>
+}
+
+const nodeContextStack: Array<NodeContext> = []
+
+const findNodeContext = (token: object): NodeContext | undefined => {
+  for (let i = nodeContextStack.length - 1; i >= 0; i--) {
+    if (nodeContextStack[i].token === token) {
+      return nodeContextStack[i]
+    }
+  }
+  return undefined
+}
+
+const isObject = (u: unknown): u is object => typeof u === 'object' && u !== null
+
+const resolveNodeValue = (value: unknown, ctx: NodeContext): unknown => {
+  const seen = new WeakSet<object>()
+  const resolveCell = (cell: Cell): unknown => {
+    if (seen.has(cell)) {
+      return cell.current
+    }
+    seen.add(cell)
+    cell.current = resolveValue(cell.current)
+    return cell.current
+  }
+  const resolveValue = (value: unknown): unknown => {
+    if (!isObject(value)) {
+      return value
+    }
+    if (ctx.cells.has(value as Cell)) {
+      return resolveCell(value as Cell)
+    }
+    if (seen.has(value)) {
+      return value
+    }
+    seen.add(value)
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        value[i] = resolveValue(value[i])
+      }
+    } else {
+      const record = value as Record<string, unknown>
+      for (const key of Object.keys(record)) {
+        record[key] = resolveValue(record[key])
+      }
+    }
+    return value
+  }
+  return resolveValue(value)
+}
+
+/**
+ * Defines a recursive decoder with an explicit decode context.
+ *
+ * Unlike {@link lazy}, which only models recursive *types*, `node` also guards against
+ * cyclic *data*: when an input object back-references one of its ancestors, the decoder
+ * either fails (`onCycle: 'reject'`, the default) or resolves the reference to the
+ * decoded value of the ancestor (`onCycle: 'reference'`).
+ *
+ * The decode context is created fresh for every `decode` call, so state never leaks
+ * between consecutive decodes and the input object is never mutated.
+ *
+ * @category combinators
+ * @since 2.2.23
+ */
+export const node = <I, A>(
+  id: string,
+  f: (self: Decoder<I, A>) => Decoder<I, A>,
+  options: NodeOptions = {}
+): Decoder<I, A> => {
+  const mode = options.onCycle ?? 'reject'
+  const token = {}
+  const wrap = (e: DecodeError): DecodeError => FS.of(DE.lazy(id, e))
+  const self: Decoder<I, A> = {
+    decode: (u) => {
+      const ctx = findNodeContext(token)
+      if (ctx === undefined) {
+        return decodeDefinition(u)
+      }
+      if (isObject(u)) {
+        if (ctx.ancestors.has(u)) {
+          if (ctx.mode === 'reference') {
+            const cell = ctx.refs.get(u)
+            if (cell !== undefined) {
+              return success(cell) as E.Either<DecodeError, A>
+            }
+          }
+          return pipe(failure(u, `cyclic reference to ancestor of type ${id}`), E.mapLeft(wrap))
+        }
+        ctx.ancestors.add(u)
+        let cell: Cell | undefined
+        if (ctx.mode === 'reference') {
+          cell = { current: undefined }
+          ctx.cells.add(cell)
+          ctx.refs.set(u, cell)
+        }
+        try {
+          const result = decodeDefinition(u)
+          if (cell !== undefined && E.isRight(result)) {
+            cell.current = result.right
+          }
+          return result
+        } finally {
+          ctx.ancestors.delete(u)
+        }
+      }
+      return decodeDefinition(u)
+    }
+  }
+  const definition = S.memoize<void, Decoder<I, A>>(() => f(self))
+  const decodeDefinition = (u: I): E.Either<DecodeError, A> => pipe(definition().decode(u), E.mapLeft(wrap))
+  const decoder: Decoder<I, A> = {
+    decode: (u) => {
+      const ctx: NodeContext = {
+        token,
+        mode,
+        ancestors: new WeakSet(),
+        refs: new WeakMap(),
+        cells: new WeakSet()
+      }
+      nodeContextStack.push(ctx)
+      try {
+        const result = self.decode(u)
+        if (mode === 'reference' && E.isRight(result)) {
+          return success(resolveNodeValue(result.right, ctx) as A)
+        }
+        return result
+      } finally {
+        nodeContextStack.pop()
+      }
+    }
+  }
+  return decoder
+}
+
+/**
  * @category combinators
  * @since 2.2.15
  */
@@ -570,8 +729,16 @@ const drawForest = (indentation: string, forest: ReadonlyArray<Tree<string>>): s
   return r
 }
 
+const safeStringify = (value: unknown): string => {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return '[Cyclic]'
+  }
+}
+
 const toTree: (e: DE.DecodeError<string>) => Tree<string> = DE.fold({
-  Leaf: (input, error) => make(`cannot decode ${JSON.stringify(input)}, should be ${error}`),
+  Leaf: (input, error) => make(`cannot decode ${safeStringify(input)}, should be ${error}`),
   Key: (key, kind, errors) => make(`${kind} property ${JSON.stringify(key)}`, toForest(errors)),
   Index: (index, kind, errors) => make(`${kind} index ${index}`, toForest(errors)),
   Member: (index, errors) => make(`member ${index}`, toForest(errors)),

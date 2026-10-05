@@ -535,6 +535,186 @@ describe.concurrent('Decoder', () => {
   })
 
   // -------------------------------------------------------------------------------------
+  // node (recursive decoders with explicit decode context)
+  // -------------------------------------------------------------------------------------
+
+  describe.concurrent('node', () => {
+    interface Node {
+      readonly name: string
+      readonly self?: Node | null
+    }
+
+    const Node: _.Decoder<unknown, Node> = _.node(
+      'Node',
+      (self) =>
+        pipe(
+          _.struct({
+            name: _.string,
+            self: _.nullable(self)
+          })
+        ),
+      { onCycle: 'reject' }
+    )
+
+    const NodeReference: _.Decoder<unknown, Node> = _.node(
+      'Node',
+      (self) =>
+        pipe(
+          _.struct({
+            name: _.string,
+            self: _.nullable(self)
+          })
+        ),
+      { onCycle: 'reference' }
+    )
+
+    // A variant without `nullable` so the error tree for cyclic data is concise
+    const NodeRequired: _.Decoder<unknown, any> = _.node('Node', (self) =>
+      _.struct({
+        name: _.string,
+        self: self
+      })
+    )
+
+    it('should decode a normal recursive structure', () => {
+      assert.deepStrictEqual(Node.decode({ name: 'a', self: null }), _.success({ name: 'a', self: null }))
+      assert.deepStrictEqual(
+        Node.decode({ name: 'a', self: { name: 'b', self: null } }),
+        _.success({ name: 'a', self: { name: 'b', self: null } })
+      )
+    })
+
+    it('should not report shared acyclic objects (diamond)', () => {
+      const shared = { name: 'shared', self: null }
+      const input = { name: 'root', self: null }
+      const a = { name: 'a', self: null }
+      const b = { name: 'b', self: null }
+      ;(a as any).self = shared
+      ;(b as any).self = shared
+      ;(input as any).self = [a, b]
+      const SharedNode: _.Decoder<unknown, any> = _.node('Node', (self) =>
+        _.struct({
+          name: _.string,
+          self: _.nullable(_.union(self, _.array(self)))
+        })
+      )
+      const result = SharedNode.decode(input)
+      assert.deepStrictEqual(E.isRight(result), true)
+      if (E.isRight(result)) {
+        assert.deepStrictEqual(result.right.name, 'root')
+        assert.deepStrictEqual(result.right.self[0].self.name, 'shared')
+        assert.deepStrictEqual(result.right.self[1].self.name, 'shared')
+      }
+    })
+
+    it('should fail finitely on a self loop (reject mode)', () => {
+      const input: any = { name: 'a' }
+      input.self = input
+      const result = NodeRequired.decode(input)
+      assert.deepStrictEqual(E.isLeft(result), true)
+      if (E.isLeft(result)) {
+        assert.deepStrictEqual(
+          pipe(result, E.mapLeft(_.draw)),
+          E.left(`lazy type Node
+└─ required property "self"
+   └─ lazy type Node
+      └─ cannot decode [Cyclic], should be cyclic reference to ancestor of type Node`)
+        )
+      }
+      // the input object is not mutated
+      assert.deepStrictEqual(input.name, 'a')
+      assert.deepStrictEqual(input.self, input)
+    })
+
+    it('should fail finitely on a two-node loop (reject mode)', () => {
+      const a: any = { name: 'a' }
+      const b: any = { name: 'b' }
+      a.self = b
+      b.self = a
+      const result = NodeRequired.decode(a)
+      assert.deepStrictEqual(E.isLeft(result), true)
+      if (E.isLeft(result)) {
+        const drawn = pipe(result, E.mapLeft(_.draw))
+        assert.deepStrictEqual(
+          drawn,
+          E.left(`lazy type Node
+└─ required property "self"
+   └─ lazy type Node
+      └─ required property "self"
+         └─ lazy type Node
+            └─ cannot decode [Cyclic], should be cyclic reference to ancestor of type Node`)
+        )
+      }
+    })
+
+    it('should resolve a self loop (reference mode)', () => {
+      const input: any = { name: 'a' }
+      input.self = input
+      const result = NodeReference.decode(input)
+      assert.deepStrictEqual(E.isRight(result), true)
+      if (E.isRight(result)) {
+        assert.deepStrictEqual(result.right.name, 'a')
+        // the decoded value back-references itself
+        assert.deepStrictEqual(result.right.self, result.right)
+      }
+    })
+
+    it('should resolve a two-node loop (reference mode)', () => {
+      const a: any = { name: 'a' }
+      const b: any = { name: 'b' }
+      a.self = b
+      b.self = a
+      const result = NodeReference.decode(a)
+      assert.deepStrictEqual(E.isRight(result), true)
+      if (E.isRight(result)) {
+        assert.deepStrictEqual(result.right.name, 'a')
+        const self = result.right.self as Node
+        assert.deepStrictEqual(self.name, 'b')
+        // the decoded value back-references itself through the loop
+        assert.deepStrictEqual(self.self, result.right)
+      }
+    })
+
+    it('should isolate state between consecutive decodes', () => {
+      // first decode: cyclic input, rejected
+      const cyclic: any = { name: 'a' }
+      cyclic.self = cyclic
+      assert.deepStrictEqual(E.isLeft(Node.decode(cyclic)), true)
+      // second decode: acyclic input, must succeed (no stale access records)
+      const acyclic = { name: 'a', self: { name: 'b', self: null } }
+      assert.deepStrictEqual(Node.decode(acyclic), _.success({ name: 'a', self: { name: 'b', self: null } }))
+      // third decode: the same cyclic input, still rejected
+      assert.deepStrictEqual(E.isLeft(Node.decode(cyclic)), true)
+    })
+
+    it('should separate type recursion from data recursion', () => {
+      // the type recursion (self-reference in the definition) is always allowed
+      const Tree: _.Decoder<unknown, any> = _.node('Tree', (self) =>
+        _.struct({
+          value: _.number,
+          children: _.array(self)
+        })
+      )
+      // acyclic data: a normal tree
+      const tree = { value: 1, children: [{ value: 2, children: [] }] }
+      assert.deepStrictEqual(Tree.decode(tree), _.success({ value: 1, children: [{ value: 2, children: [] }] }))
+      // cyclic data: a child back-references an ancestor
+      const cyclic: any = { value: 1, children: [] }
+      cyclic.children.push(cyclic)
+      assert.deepStrictEqual(E.isLeft(Tree.decode(cyclic)), true)
+    })
+
+    it('should not mutate the input when rejecting', () => {
+      const input: any = { name: 'a' }
+      input.self = input
+      const snapshot = JSON.stringify(input, (key, value) => (key === 'self' ? '<cyclic>' : value))
+      Node.decode(input)
+      const after = JSON.stringify(input, (key, value) => (key === 'self' ? '<cyclic>' : value))
+      assert.deepStrictEqual(after, snapshot)
+    })
+  })
+
+  // -------------------------------------------------------------------------------------
   // utils
   // -------------------------------------------------------------------------------------
 
