@@ -102,4 +102,97 @@ describe.concurrent('brand', () => {
       assert.strictEqual(T.encode, t.identity)
     })
   })
+
+  describe.concurrent('decodeWithEvidence', () => {
+    interface IntBrand {
+      readonly Int: unique symbol
+    }
+    interface PositiveBrand {
+      readonly Positive: unique symbol
+    }
+    type IntBranded = t.Branded<number, IntBrand>
+    type PositiveBranded = t.Branded<IntBranded, PositiveBrand>
+
+    it('should record the base decode and brand predicate results separately', () => {
+      const Int = t.brand(t.number, (n): n is IntBranded => Number.isInteger(n), 'Int')
+      const Positive = t.brand(Int, (n): n is PositiveBranded => n >= 0, 'Positive')
+
+      // base passes, brand fails: integer base holds but Positive does not
+      const failed = Positive.decodeWithEvidence(-5)
+      assert.strictEqual(failed.result._tag, 'Left')
+      assert.strictEqual(failed.evidence.base._tag, 'Right')
+      assert.strictEqual(failed.evidence.brand, false)
+
+      // both pass
+      const succeeded = Positive.decodeWithEvidence(5)
+      assert.strictEqual(succeeded.result._tag, 'Right')
+      assert.strictEqual(succeeded.evidence.base._tag, 'Right')
+      assert.strictEqual(succeeded.evidence.brand, true)
+
+      // base fails: the brand predicate must not run
+      const baseFailed = Positive.decodeWithEvidence(1.5)
+      assert.strictEqual(baseFailed.result._tag, 'Left')
+      assert.strictEqual(baseFailed.evidence.base._tag, 'Left')
+      assert.strictEqual(baseFailed.evidence.brand, false)
+    })
+
+    it('should run the base decode once and the brand predicate at most once', () => {
+      let intCalls = 0
+      let positiveCalls = 0
+      const Int = t.brand(
+        t.number,
+        (n): n is IntBranded => {
+          intCalls++
+          return Number.isInteger(n)
+        },
+        'Int'
+      )
+      const Positive = t.brand(
+        Int,
+        (n): n is PositiveBranded => {
+          positiveCalls++
+          return n >= 0
+        },
+        'Positive'
+      )
+
+      Positive.decodeWithEvidence(5)
+      assert.strictEqual(intCalls, 1)
+      assert.strictEqual(positiveCalls, 1)
+
+      Positive.decodeWithEvidence(-5)
+      assert.strictEqual(intCalls, 2)
+      assert.strictEqual(positiveCalls, 2)
+
+      Positive.decodeWithEvidence(1.5)
+      assert.strictEqual(intCalls, 3)
+      assert.strictEqual(positiveCalls, 2)
+    })
+
+    it('should not return a fake brand value on failure', () => {
+      const Int = t.brand(t.number, (n): n is IntBranded => Number.isInteger(n), 'Int')
+      const Positive = t.brand(Int, (n): n is PositiveBranded => n >= 0, 'Positive')
+      const failed = Positive.decodeWithEvidence(-1)
+      assert.strictEqual(failed.result._tag, 'Left')
+      // the error must not claim the value is branded
+      if (failed.result._tag === 'Left') {
+        assert.strictEqual(failed.result.left.length, 1)
+        assert.strictEqual(failed.result.left[0].value, -1)
+      }
+    })
+
+    it('should not re-run business predicates on encode', () => {
+      let calls = 0
+      const T = t.brand(
+        t.number,
+        (n): n is t.Branded<number, PositiveBrand> => {
+          calls++
+          return n >= 0
+        },
+        'Positive'
+      )
+      T.encode(1 as any)
+      assert.strictEqual(calls, 0)
+    })
+  })
 })

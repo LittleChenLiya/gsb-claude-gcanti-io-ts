@@ -27,6 +27,7 @@
     "release": "ts-node scripts/release",
     "import-path-rewrite": "import-path-rewrite",
     "vitest": "vitest run",
+    "brand-evidence": "ts-node --transpile-only scripts/brand-evidence.ts",
     "coverage": "vitest run --coverage"
   },
   "repository": {

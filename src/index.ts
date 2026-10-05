@@ -1122,6 +1122,30 @@ export class RefinementType<C extends Any, A = any, O = A, I = unknown> extends 
   ) {
     super(name, is, validate, encode)
   }
+  /**
+   * Decodes a value and returns an explicit evidence receipt.
+   *
+   * A brand is a TypeScript-only marker; at runtime there is no brand stamp.
+   * This receipt makes the runtime behaviour explicit by recording the result
+   * of the two stages (the base decode and the brand predicate) separately,
+   * instead of relying on the TypeScript brand marker as a runtime guarantee.
+   *
+   * The base decode runs once and the brand predicate runs at most once per
+   * call; the evidence is computed a single time and reused for both the
+   * returned result and the receipt.
+   *
+   * @since 2.2.23
+   */
+  decodeWithEvidence(i: I): { readonly result: Validation<A>; readonly evidence: BrandEvidence<A> } {
+    const context: Context = [{ key: '', type: this, actual: i }]
+    const evidence = getBrandEvidence(this.type, this.predicate as Predicate<TypeOf<C>>, i, context)
+    const result = isLeft(evidence.base)
+      ? evidence.base
+      : evidence.brand
+      ? success(evidence.base.right)
+      : failure(evidence.base.right, context)
+    return { result: result as Validation<A>, evidence: evidence as BrandEvidence<A> }
+  }
 }
 
 declare const _brand: unique symbol
@@ -1137,6 +1161,23 @@ export interface Brand<B> {
  * @since 1.8.1
  */
 export type Branded<A, B> = A & Brand<B>
+
+/**
+ * The evidence produced when decoding a value through a brand refinement.
+ *
+ * A brand is a TypeScript-only marker; at runtime there is no brand stamp.
+ * This receipt makes the runtime behaviour explicit by recording the result
+ * of the two stages (the base decode and the brand predicate) separately,
+ * instead of relying on the TypeScript brand marker as a runtime guarantee.
+ *
+ * @since 2.2.23
+ */
+export interface BrandEvidence<A> {
+  /** the result of decoding the underlying (base) codec */
+  readonly base: Validation<A>
+  /** whether the brand predicate passed against the decoded value */
+  readonly brand: boolean
+}
 
 /**
  * @since 1.8.1
@@ -2062,6 +2103,29 @@ export const any: AnyC = new AnyType()
 export interface RefinementC<C extends Any, B = TypeOf<C>> extends RefinementType<C, B, OutputOf<C>, InputOf<C>> {}
 
 /**
+ * Computes the explicit evidence receipt for a brand refinement.
+ *
+ * The base decode runs once and the brand predicate runs at most once; the
+ * returned receipt records both results separately so that the runtime
+ * behaviour does not rely on the TypeScript brand marker as a guarantee.
+ *
+ * @internal
+ */
+function getBrandEvidence<C extends Any>(
+  codec: C,
+  predicate: Predicate<TypeOf<C>>,
+  i: unknown,
+  context: Context
+): BrandEvidence<TypeOf<C>> {
+  const base = codec.validate(i, context)
+  if (isLeft(base)) {
+    return { base, brand: false }
+  }
+  const brand = predicate(base.right)
+  return { base, brand }
+}
+
+/**
  * @category combinators
  * @since 1.0.0
  */
@@ -2080,12 +2144,11 @@ export function refinement<C extends Any>(
     name,
     (u): u is TypeOf<C> => codec.is(u) && predicate(u),
     (i, c) => {
-      const e = codec.validate(i, c)
-      if (isLeft(e)) {
-        return e
+      const evidence = getBrandEvidence(codec, predicate, i, c)
+      if (isLeft(evidence.base)) {
+        return evidence.base
       }
-      const a = e.right
-      return predicate(a) ? success(a) : failure(a, c)
+      return evidence.brand ? success(evidence.base.right) : failure(evidence.base.right, c)
     },
     codec.encode,
     codec,
