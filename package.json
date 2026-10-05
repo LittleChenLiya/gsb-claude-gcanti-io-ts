@@ -21,6 +21,7 @@
     "perf": "ts-node perf/index",
     "dtslint": "dtslint --expectOnly dtslint",
     "mocha": "TS_NODE_CACHE=false mocha -r ts-node/register test/*.ts",
+    "example:cycles": "ts-node examples/cycle-guard.ts",
     "doctoc": "doctoc README.md index.md Decoder.md Encoder.md Codec.md Eq.md Schema.md",
     "docs": "docs-ts",
     "prerelease": "npm run build",

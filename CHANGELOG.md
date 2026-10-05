@@ -14,6 +14,15 @@
 **Note**: Gaps between patch versions are faulty/broken releases.
 **Note**: A feature tagged as Experimental is in a high state of flux, you're at risk of it changing without notice.
 
+# 2.2.23
+
+- **New Feature**
+  - add `CycleGuard` module: an explicit, per-decode context (`createCycleGuardContext`) plus combinators
+    (`guardCycles`, `recursionWithCycleGuard`) that detect data-level cycles while decoding recursive data. Shared
+    acyclic inputs decode normally; inputs that truly point back to an ancestor are either rejected with an error
+    carrying the input and the type path (`reject` policy) or resolved through a registered reference (`reference`
+    policy). Plain `t.recursion` codecs are unchanged
+
 # 2.2.22
 
 - **Bug Fix**
