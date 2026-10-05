@@ -10,6 +10,7 @@
 - [Recursive types](#recursive-types)
   - [Mutually recursive types](#mutually-recursive-types)
 - [Branded types / Refinements](#branded-types--refinements)
+  - [Brand evidence receipts](#brand-evidence-receipts)
 - [Exact types](#exact-types)
 - [Mixing required and optional props](#mixing-required-and-optional-props)
 - [Custom types](#custom-types)
@@ -411,6 +412,50 @@ type PositiveInt = t.TypeOf<typeof PositiveInt>
 same as
 type PositiveInt = number & t.Brand<t.IntBrand> & t.Brand<PositiveBrand>
 */
+```
+
+## Brand evidence receipts
+
+A TypeScript brand (`t.Brand<B>`) is a compile-time only marker: it provides no
+runtime guarantee by itself. The `brandEvidence` combinator makes the runtime
+checks explicit by returning an **evidence receipt** which records the outcome
+of the base decode and of each brand predicate separately
+
+```ts
+const PositiveEven = t.brandEvidence(t.number, [
+  { name: 'Positive', predicate: (n) => n > 0 },
+  { name: 'Even', predicate: (n) => n % 2 === 0 }
+])
+
+const { result, receipt } = PositiveEven.decodeWithReceipt(-1)
+/*
+receipt = {
+  base: 'success', // the base decode succeeded...
+  brands: [{ name: 'Positive', passed: false }] // ...but the Positive brand check failed
+}
+*/
+```
+
+Guarantees:
+
+- the base codec is decoded first and its outcome is recorded as `receipt.base`
+- multiple brand checks are executed in declaration order, each user predicate
+  is executed **at most once** per decode and its outcome is recorded in
+  `receipt.brands`
+- the first failing check short-circuits the remaining ones and the failure is
+  attributed to that brand: an entry is appended to the error context while the
+  surrounding nested context is preserved, e.g.
+  `Invalid value -1 supplied to : { name: string, age: (number | Positive & Even) }/age: (number | Positive & Even)/: Positive`
+- a failing check never returns a fake branded value: the result is a `Left`
+- `encode` is the base codec's `encode`: brand predicates are never secretly
+  re-run during encoding
+
+A runnable two-brand example lives in
+[`examples/brand-evidence.ts`](examples/brand-evidence.ts), run it locally with
+Node:
+
+```sh
+npx ts-node examples/brand-evidence.ts
 ```
 
 # Exact types

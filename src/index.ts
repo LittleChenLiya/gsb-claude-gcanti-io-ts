@@ -1176,6 +1176,148 @@ export const Int = brand(number, (n): n is Branded<number, IntBrand> => Number.i
 export type Int = Branded<number, IntBrand>
 
 /**
+ * A named runtime check attached to a brand evidence codec.
+ *
+ * The `name` is recorded in the evidence receipt and is appended to the error
+ * context when the check fails, so failures are attributed to the specific brand
+ *
+ * @since 2.2.23
+ */
+export interface BrandCheck<A> {
+  readonly name: string
+  readonly predicate: Predicate<A>
+}
+
+/**
+ * The recorded outcome of a single brand check
+ *
+ * @since 2.2.23
+ */
+export interface BrandReceiptEntry {
+  readonly name: string
+  readonly passed: boolean
+}
+
+/**
+ * An explicit evidence receipt for a branded decode: the outcome of the base
+ * decode and the outcome of each executed brand predicate are recorded
+ * separately.
+ *
+ * A TypeScript brand (e.g. `Brand<B>`) is a compile-time only marker and
+ * provides no runtime guarantee: the receipt is the runtime evidence
+ *
+ * @since 2.2.23
+ */
+export interface BrandReceipt {
+  /** the outcome of the base codec decode */
+  readonly base: 'success' | 'failure'
+  /** one entry for each brand check actually executed, in declaration order */
+  readonly brands: ReadonlyArray<BrandReceiptEntry>
+}
+
+/**
+ * A decode result paired with its evidence receipt
+ *
+ * @since 2.2.23
+ */
+export interface BrandEvidenceResult<A> {
+  readonly result: Validation<A>
+  readonly receipt: BrandReceipt
+}
+
+/**
+ * @category combinators
+ * @since 2.2.23
+ */
+export class BrandEvidenceType<C extends Any, A = any, O = A, I = unknown> extends Type<A, O, I> {
+  /**
+   * @since 2.2.23
+   */
+  readonly _tag: 'BrandEvidenceType' = 'BrandEvidenceType'
+  constructor(
+    name: string,
+    is: BrandEvidenceType<C, A, O, I>['is'],
+    validate: BrandEvidenceType<C, A, O, I>['validate'],
+    encode: BrandEvidenceType<C, A, O, I>['encode'],
+    readonly base: C,
+    readonly checks: ReadonlyArray<BrandCheck<TypeOf<C>>>,
+    readonly validateWithReceipt: (i: I, c: Context) => BrandEvidenceResult<TypeOf<C>>
+  ) {
+    super(name, is, validate, encode)
+  }
+  /**
+   * a version of `decode` which also returns the evidence receipt
+   *
+   * @since 2.2.23
+   */
+  decodeWithReceipt(i: I): BrandEvidenceResult<A> {
+    return this.validateWithReceipt(i, [{ key: '', type: this, actual: i }])
+  }
+}
+
+/**
+ * @category combinators
+ * @since 2.2.23
+ */
+export interface BrandEvidenceC<C extends Any> extends BrandEvidenceType<C, TypeOf<C>, OutputOf<C>, InputOf<C>> {}
+
+/**
+ * Like `brand`, but produces an explicit evidence receipt and supports multiple
+ * named brand checks out of the box:
+ *
+ * - the base codec is decoded first and its outcome is recorded as `receipt.base`
+ * - brand checks are then executed in declaration order, each user predicate is
+ *   executed at most once per decode and its outcome is recorded in `receipt.brands`
+ * - the first failing check short-circuits the remaining ones and the failure is
+ *   attributed to that check: an entry is appended to the error context while the
+ *   surrounding nested context is preserved
+ * - a failing check never yields a (fake) branded value: the result is a `Left`
+ * - `encode` is the base codec's `encode`: brand predicates are never re-run
+ *
+ * @category combinators
+ * @since 2.2.23
+ */
+export function brandEvidence<C extends Any>(
+  codec: C,
+  checks: ReadonlyArray<BrandCheck<TypeOf<C>>>,
+  name = `(${codec.name} | ${checks.map((check) => check.name).join(' & ')})`
+): BrandEvidenceC<C> {
+  // context labels used to attribute a failure to a specific brand check,
+  // they are derived from the base codec and never execute user predicates
+  const labels = checks.map(
+    (check) => new Type<TypeOf<C>, OutputOf<C>, InputOf<C>>(check.name, codec.is, codec.validate, codec.encode)
+  )
+  const validateWithReceipt = (i: InputOf<C>, c: Context): BrandEvidenceResult<TypeOf<C>> => {
+    const e = codec.validate(i, c)
+    if (isLeft(e)) {
+      return { result: e, receipt: { base: 'failure', brands: [] } }
+    }
+    const a = e.right
+    const brands: Array<BrandReceiptEntry> = []
+    for (let k = 0; k < checks.length; k++) {
+      const check = checks[k]
+      // each user predicate is executed exactly once per decode
+      const passed = check.predicate(a)
+      brands.push({ name: check.name, passed })
+      if (!passed) {
+        // attribute the failure to this brand check, preserving the nested context
+        return { result: failure(a, appendContext(c, '', labels[k], a)), receipt: { base: 'success', brands } }
+      }
+    }
+    return { result: success(a), receipt: { base: 'success', brands } }
+  }
+  return new BrandEvidenceType(
+    name,
+    (u): u is TypeOf<C> => codec.is(u) && checks.every((check) => check.predicate(u)),
+    (i, c) => validateWithReceipt(i, c).result,
+    codec.encode,
+    codec,
+    checks,
+    validateWithReceipt
+  )
+}
+
+/**
  * @since 1.0.0
  */
 export class RecursiveType<C extends Any, A = any, O = A, I = unknown> extends Type<A, O, I> {
