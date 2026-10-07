@@ -264,3 +264,163 @@ describe.concurrent('union', () => {
     assert.deepStrictEqual(t.getIndex([U1, M4]), ['tag', [['a', 'b'], ['c']]])
   })
 })
+
+describe.concurrent('strictUnion', () => {
+  // two overlapping codecs: a positive number matches both branches
+  const stringWithSpy = (): { codec: t.Mixed; calls: number } => {
+    let calls = 0
+    return {
+      codec: new t.Type<string, string, unknown>(
+        'SpyString',
+        t.string.is,
+        (u, c) => t.string.validate(u, c),
+        (a) => {
+          calls++
+          return a
+        }
+      ),
+      get calls() {
+        return calls
+      }
+    }
+  }
+
+  const numberWithSpy = (): { codec: t.Mixed; calls: number } => {
+    let calls = 0
+    return {
+      codec: new t.Type<number, string, unknown>(
+        'SpyNumber',
+        t.number.is,
+        (u, c) => t.number.validate(u, c),
+        (a) => {
+          calls++
+          return String(a)
+        }
+      ),
+      get calls() {
+        return calls
+      }
+    }
+  }
+
+  const positiveWithSpy = (): { codec: t.Mixed; calls: number } => {
+    let calls = 0
+    return {
+      codec: new t.Type<number, string, unknown>(
+        'SpyPositive',
+        (u): u is number => t.number.is(u) && u > 0,
+        (u, c) => t.number.validate(u, c),
+        (a) => {
+          calls++
+          return `+${a}`
+        }
+      ),
+      get calls() {
+        return calls
+      }
+    }
+  }
+
+  describe.concurrent('encode', () => {
+    it('should not encode any branch when more than one branch matches (ambiguous)', () => {
+      const spyNumber = numberWithSpy()
+      const spyPositive = positiveWithSpy()
+      const U = t.strictUnion([spyNumber.codec, spyPositive.codec])
+
+      assert.throws(
+        () => {
+          U.encode(1 as any)
+        },
+        (err: any) => {
+          assert.ok(err instanceof Error)
+          // the error carries the matching branch indexes and names
+          assert.ok(/2 codecs found to encode value in strict union type/.test(err.message))
+          assert.ok(err.message.indexOf('0: SpyNumber') !== -1)
+          assert.ok(err.message.indexOf('1: SpyPositive') !== -1)
+          return true
+        }
+      )
+      // zero encodings on ambiguity: neither spy was called
+      assert.strictEqual(spyNumber.calls, 0)
+      assert.strictEqual(spyPositive.calls, 0)
+    })
+
+    it('should not encode any branch when no branch matches', () => {
+      const spyNumber = numberWithSpy()
+      const spyPositive = positiveWithSpy()
+      const U = t.strictUnion([spyNumber.codec, spyPositive.codec])
+
+      assert.throws(
+        () => {
+          U.encode(true as any)
+        },
+        (err: any) => {
+          assert.ok(err instanceof Error)
+          // the error carries the checked branch indexes and names
+          assert.ok(/no codec found to encode value in strict union type/.test(err.message))
+          assert.ok(err.message.indexOf('0: SpyNumber') !== -1)
+          assert.ok(err.message.indexOf('1: SpyPositive') !== -1)
+          return true
+        }
+      )
+      // zero encodings: the value matched no branch
+      assert.strictEqual(spyNumber.calls, 0)
+      assert.strictEqual(spyPositive.calls, 0)
+    })
+
+    it('should encode exactly once with the unique matching branch', () => {
+      const spyString = stringWithSpy()
+      const spyNumber = numberWithSpy()
+      const spyPositive = positiveWithSpy()
+      const U = t.strictUnion([spyString.codec, spyNumber.codec, spyPositive.codec])
+
+      // a string matches only SpyString
+      assert.strictEqual(U.encode('a' as any), 'a')
+      assert.strictEqual(spyString.calls, 1)
+      assert.strictEqual(spyNumber.calls, 0)
+      assert.strictEqual(spyPositive.calls, 0)
+
+      // a non-positive number matches only SpyNumber (SpyPositive requires > 0)
+      assert.strictEqual(U.encode(-1 as any), '-1')
+      assert.strictEqual(spyString.calls, 1)
+      assert.strictEqual(spyNumber.calls, 1)
+      assert.strictEqual(spyPositive.calls, 0)
+
+      // a positive number is ambiguous again: SpyNumber + SpyPositive, no encoding
+      assert.throws(() => {
+        U.encode(1 as any)
+      })
+      assert.strictEqual(spyString.calls, 1)
+      assert.strictEqual(spyNumber.calls, 1)
+      assert.strictEqual(spyPositive.calls, 0)
+    })
+
+    it('should keep the default union encoding strategy (first matching branch wins)', () => {
+      const spyNumber = numberWithSpy()
+      const spyPositive = positiveWithSpy()
+      const U = t.union([spyNumber.codec, spyPositive.codec])
+
+      // no throw on overlap: the first matching branch encodes
+      assert.strictEqual(U.encode(1 as any), '1')
+      assert.strictEqual(spyNumber.calls, 1)
+      assert.strictEqual(spyPositive.calls, 0)
+    })
+  })
+
+  describe.concurrent('decode', () => {
+    it('should decode the same way as union', () => {
+      const U = t.strictUnion([t.string, t.number])
+      assertSuccess(U.decode('s'))
+      assertSuccess(U.decode(1))
+      assertFailure(U, true, [
+        'Invalid value true supplied to : (string | number)/0: string',
+        'Invalid value true supplied to : (string | number)/1: number'
+      ])
+    })
+
+    it('should assign the default name', () => {
+      const U = t.strictUnion([t.string, t.number])
+      assert.strictEqual(U.name, '(string | number)')
+    })
+  })
+})

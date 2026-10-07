@@ -1639,6 +1639,56 @@ export function union<CS extends [Mixed, Mixed, ...Array<Mixed>]>(
 }
 
 /**
+ * Strict version of `union`: a value is encoded only when **exactly one**
+ * member codec's `is` check succeeds. When no branch matches (zero matches)
+ * or more than one branch matches (ambiguous match), an error reporting the
+ * branch indexes and names is thrown and no member `encode` is called.
+ *
+ * Branches are always selected with `is` checks before encoding, this never
+ * tries to encode a value in order to pick a branch. Decoding is the same as
+ * `union` and the default `union` encoding strategy is left untouched.
+ *
+ * @category combinators
+ * @since 2.2.23
+ */
+export function strictUnion<CS extends [Mixed, Mixed, ...Array<Mixed>]>(
+  codecs: CS,
+  name: string = getUnionName(codecs)
+): UnionC<CS> {
+  const U = union(codecs, name)
+  const branchInfo = (indexes: Array<number>): string => indexes.map((i) => `${i}: ${codecs[i].name}`).join(', ')
+  return new UnionType(
+    name,
+    U.is,
+    U.validate,
+    (a) => {
+      const matches: Array<number> = []
+      for (let i = 0; i < codecs.length; i++) {
+        if (codecs[i].is(a)) {
+          matches.push(i)
+        }
+      }
+      if (matches.length === 0) {
+        throw new Error(
+          `no codec found to encode value in strict union type ${name}: no branch matched, checked [${branchInfo(
+            codecs.map((_, i) => i)
+          )}]`
+        )
+      }
+      if (matches.length > 1) {
+        throw new Error(
+          `${matches.length} codecs found to encode value in strict union type ${name}: branches [${branchInfo(
+            matches
+          )}] all matched`
+        )
+      }
+      return codecs[matches[0]].encode(a)
+    },
+    codecs
+  )
+}
+
+/**
  * @since 1.0.0
  */
 export class IntersectionType<CS extends Array<Any>, A = any, O = A, I = unknown> extends Type<A, O, I> {

@@ -14,6 +14,11 @@
 **Note**: Gaps between patch versions are faulty/broken releases.
 **Note**: A feature tagged as Experimental is in a high state of flux, you're at risk of it changing without notice.
 
+# 2.2.23
+
+- **New Feature**
+  - Add `strictUnion`: a union encoding entry point that only encodes when exactly one member codec's `is` check succeeds, throwing branch information on zero or multiple matches
+
 # 2.2.22
 
 - **Bug Fix**
