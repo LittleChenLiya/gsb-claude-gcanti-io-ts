@@ -132,6 +132,112 @@ describe.concurrent('union', () => {
         T2.encode(1 as any)
       })
     })
+
+    // a tiny local spy: wraps a codec so that `encode` invocations can be counted
+    const spy = <A, O>(codec: t.Type<A, O>) => {
+      const calls: Array<A> = []
+      return {
+        calls,
+        codec: new t.Type<A, O, unknown>(codec.name, codec.is, codec.validate, (a) => {
+          calls.push(a)
+          return codec.encode(a)
+        })
+      }
+    }
+
+    describe.concurrent('strict union encoding (strictUnion / getStrictUnionEncode)', () => {
+      // fresh fixtures for each test: two overlapping codecs (both accept { a: number }) and a
+      // non-overlapping codec (number)
+      const setup = () => {
+        const A = spy(t.type({ a: t.number }))
+        const B = spy(t.type({ a: t.number, b: t.string }))
+        const N = spy(t.number)
+        const codecs = [A.codec, B.codec, N.codec] as [t.Mixed, t.Mixed, ...Array<t.Mixed>]
+        return { A, B, N, codecs }
+      }
+
+      it('should not encode any branch when zero branches match, reporting the branches', () => {
+        const { A, B, N, codecs } = setup()
+        const U = t.strictUnion(codecs)
+        assert.throws(
+          () => U.encode(true as any),
+          (err: Error) =>
+            err.message ===
+            'no codec found to encode value in union type ({ a: number } | { a: number, b: string } | number), branches: [0: { a: number }, 1: { a: number, b: string }, 2: number]'
+        )
+        assert.deepStrictEqual(A.calls, [])
+        assert.deepStrictEqual(B.calls, [])
+        assert.deepStrictEqual(N.calls, [])
+      })
+
+      it('should not encode any branch when multiple branches match, reporting the branches', () => {
+        const { A, B, N, codecs } = setup()
+        const U = t.strictUnion(codecs)
+        assert.throws(
+          () => U.encode({ a: 1, b: 'x' } as any),
+          (err: Error) =>
+            err.message ===
+            'multiple codecs found to encode value in union type ({ a: number } | { a: number, b: string } | number), branches: [0: { a: number }, 1: { a: number, b: string }]'
+        )
+        assert.deepStrictEqual(A.calls, [])
+        assert.deepStrictEqual(B.calls, [])
+        assert.deepStrictEqual(N.calls, [])
+      })
+
+      it('should encode the unique matching branch exactly once', () => {
+        const { A, B, N, codecs } = setup()
+        const U = t.strictUnion(codecs)
+        assert.deepStrictEqual(U.encode({ a: 1 } as any), { a: 1 })
+        assert.strictEqual(A.calls.length, 1)
+        assert.deepStrictEqual(B.calls, [])
+        assert.deepStrictEqual(N.calls, [])
+
+        assert.strictEqual(U.encode(1 as any), 1)
+        assert.strictEqual(N.calls.length, 1)
+        assert.strictEqual(A.calls.length, 1)
+        assert.deepStrictEqual(B.calls, [])
+      })
+
+      it('should encode a prismatic unique branch exactly once', () => {
+        const P = spy(NumberFromString)
+        const U = t.strictUnion([P.codec, t.boolean])
+        assert.strictEqual(U.encode(1 as any), '1')
+        assert.strictEqual(P.calls.length, 1)
+      })
+
+      it('should expose the same entry through getStrictUnionEncode', () => {
+        const { A, B, codecs } = setup()
+        const encode = t.getStrictUnionEncode(codecs)
+        assert.deepStrictEqual(encode({ a: 1 } as any), { a: 1 })
+        assert.strictEqual(A.calls.length, 1)
+        assert.deepStrictEqual(B.calls, [])
+        assert.throws(() => encode(true as any))
+      })
+
+      it('should keep the default union.encode strategy (first match wins, ambiguity is tolerated)', () => {
+        const { A, B, N, codecs } = setup()
+        const U = t.union(codecs)
+        // ambiguous value: the default strategy picks the first matching branch and encodes once
+        assert.deepStrictEqual(U.encode({ a: 1, b: 'x' } as any), { a: 1, b: 'x' })
+        assert.strictEqual(A.calls.length, 1)
+        assert.deepStrictEqual(B.calls, [])
+        // unique matches still work
+        assert.strictEqual(U.encode(1 as any), 1)
+        assert.strictEqual(N.calls.length, 1)
+      })
+
+      it('should apply the strict check to the tagged (optimized) union path as well', () => {
+        // refinement preserves the tag metadata, so getIndex turns this into a TaggedUnionType
+        // tslint:disable-next-line: deprecation
+        const MA = t.refinement(t.type({ tag: t.literal('A'), a: t.number }), () => true)
+        // tslint:disable-next-line: deprecation
+        const MB = t.refinement(t.type({ tag: t.literal('B'), b: t.number }), () => true)
+        const U = t.strictUnion([MA, MB])
+        assert.deepStrictEqual(U.encode({ tag: 'A', a: 1 }), { tag: 'A', a: 1 })
+        // unknown tag: no member matches and nothing is encoded
+        assert.throws(() => U.encode({ tag: 'C' } as any), /no codec found to encode value/)
+      })
+    })
   })
 
   describe.concurrent('getTags', () => {

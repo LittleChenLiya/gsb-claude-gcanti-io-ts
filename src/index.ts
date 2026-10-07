@@ -1556,6 +1556,61 @@ export function union<CS extends [Mixed, Mixed, ...Array<Mixed>]>(
   codecs: CS,
   name: string = getUnionName(codecs)
 ): UnionC<CS> {
+  return makeUnion(codecs, name, false)
+}
+
+/**
+ * Builds an encoder for a union codec that only encodes when **exactly one** member's `is` succeeds.
+ *
+ * Contrarily to the default `union` encode strategy (which picks the first matching member), the
+ * members are never encoded in order to select a branch: the branches are checked with `is` first
+ * and the unique match is encoded once. When no member or more than one member matches an error
+ * containing the relevant branch indexes and names is thrown.
+ *
+ * @category combinators
+ * @since 2.2.23
+ */
+export function getStrictUnionEncode<CS extends [Mixed, Mixed, ...Array<Mixed>]>(
+  codecs: CS,
+  name: string = getUnionName(codecs)
+): Encode<TypeOf<CS[number]>, OutputOf<CS[number]>> {
+  const branches = (indexes: Array<number>): string => indexes.map((i) => `${i}: ${codecs[i].name}`).join(', ')
+  const all = codecs.map((_, i) => i)
+  return (a) => {
+    const matches: Array<number> = []
+    for (let i = 0; i < codecs.length; i++) {
+      if (codecs[i].is(a)) {
+        matches.push(i)
+      }
+    }
+    if (matches.length === 0) {
+      // https://github.com/gcanti/io-ts/pull/305
+      throw new Error(`no codec found to encode value in union type ${name}, branches: [${branches(all)}]`)
+    }
+    if (matches.length > 1) {
+      throw new Error(`multiple codecs found to encode value in union type ${name}, branches: [${branches(matches)}]`)
+    }
+    const i = matches[0]
+    return codecs[i].encode(a as any) as any
+  }
+}
+
+/**
+ * Same as `union` but the returned codec encodes with a strict branch check: encoding succeeds only
+ * when exactly one member's `is` matches the value, see `getStrictUnionEncode`. The default
+ * `union` encode strategy is left untouched.
+ *
+ * @category combinators
+ * @since 2.2.23
+ */
+export function strictUnion<CS extends [Mixed, Mixed, ...Array<Mixed>]>(
+  codecs: CS,
+  name: string = getUnionName(codecs)
+): UnionC<CS> {
+  return makeUnion(codecs, name, true)
+}
+
+function makeUnion<CS extends [Mixed, Mixed, ...Array<Mixed>]>(codecs: CS, name: string, strict: boolean): UnionC<CS> {
   const index = getIndex(codecs)
   if (index !== undefined && codecs.length > 0) {
     const [tag, groups] = index
@@ -1568,6 +1623,19 @@ export function union<CS extends [Mixed, Mixed, ...Array<Mixed>]>(
       }
       return undefined
     }
+    const encode: Encode<any, any> = strict
+      ? getStrictUnionEncode(codecs, name)
+      : useIdentity(codecs)
+      ? identity
+      : (a) => {
+          const i = find(a[tag])
+          if (i === undefined) {
+            // https://github.com/gcanti/io-ts/pull/305
+            throw new Error(`no codec found to encode value in union codec ${name}`)
+          } else {
+            return codecs[i].encode(a)
+          }
+        }
     // tslint:disable-next-line: deprecation
     return new TaggedUnionType(
       name,
@@ -1591,21 +1659,24 @@ export function union<CS extends [Mixed, Mixed, ...Array<Mixed>]>(
         const codec = codecs[i]
         return codec.validate(r, appendContext(c, String(i), codec, r))
       },
-      useIdentity(codecs)
-        ? identity
-        : (a) => {
-            const i = find(a[tag])
-            if (i === undefined) {
-              // https://github.com/gcanti/io-ts/pull/305
-              throw new Error(`no codec found to encode value in union codec ${name}`)
-            } else {
-              return codecs[i].encode(a)
-            }
-          },
+      encode,
       codecs,
       tag
     )
   } else {
+    const encode: Encode<any, any> = strict
+      ? getStrictUnionEncode(codecs, name)
+      : useIdentity(codecs)
+      ? identity
+      : (a) => {
+          for (const codec of codecs) {
+            if (codec.is(a)) {
+              return codec.encode(a)
+            }
+          }
+          // https://github.com/gcanti/io-ts/pull/305
+          throw new Error(`no codec found to encode value in union type ${name}`)
+        }
     return new UnionType(
       name,
       (u): u is TypeOf<CS[number]> => codecs.some((type) => type.is(u)),
@@ -1622,17 +1693,7 @@ export function union<CS extends [Mixed, Mixed, ...Array<Mixed>]>(
         }
         return failures(errors)
       },
-      useIdentity(codecs)
-        ? identity
-        : (a) => {
-            for (const codec of codecs) {
-              if (codec.is(a)) {
-                return codec.encode(a)
-              }
-            }
-            // https://github.com/gcanti/io-ts/pull/305
-            throw new Error(`no codec found to encode value in union type ${name}`)
-          },
+      encode,
       codecs
     )
   }

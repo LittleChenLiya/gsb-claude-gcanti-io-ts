@@ -14,6 +14,11 @@
 **Note**: Gaps between patch versions are faulty/broken releases.
 **Note**: A feature tagged as Experimental is in a high state of flux, you're at risk of it changing without notice.
 
+# 2.2.23
+
+- **New Feature**
+  - add a strict entry for union encoding (`strictUnion` / `getStrictUnionEncode`): a value is encoded only when exactly one member's `is` matches, zero or multiple matches throw with the involved branch indexes and names; the default `union.encode` strategy is unchanged
+
 # 2.2.22
 
 - **Bug Fix**
