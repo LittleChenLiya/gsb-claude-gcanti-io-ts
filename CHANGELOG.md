@@ -14,6 +14,11 @@
 **Note**: Gaps between patch versions are faulty/broken releases.
 **Note**: A feature tagged as Experimental is in a high state of flux, you're at risk of it changing without notice.
 
+# Unreleased
+
+- **New Feature**
+  - `withMigrations` codec composition helper and `decodeWithWarnings` runner: decode can accumulate non-fatal migration warnings (nested ones carry their path) on an independent channel; failures still return the original `Errors`, warnings are never a `Left`, and `encode` keeps delegating to the wrapped codec without carrying a warning object
+
 # 2.2.22
 
 - **Bug Fix**

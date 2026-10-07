@@ -212,6 +212,145 @@ export class Type<A, O = A, I = unknown> implements Decoder<I, A>, Encoder<A, O>
 }
 
 // -------------------------------------------------------------------------------------
+// migration warnings (independent decode channel)
+// -------------------------------------------------------------------------------------
+
+/**
+ * A non-fatal warning produced while decoding. Warnings live on a channel that is
+ * independent of the `Either` returned by `decode`: they never turn a successful
+ * decode into a `Left`, and they do not participate in `encode`.
+ *
+ * - `path` is the `/`-joined decode path where the warning originated (e.g. `address/street`)
+ * - `message` describes the migration/transformation that happened
+ *
+ * @category Decode error
+ * @since 2.2.23
+ */
+export interface DecodeWarning {
+  readonly path: string
+  readonly message: string
+}
+
+/**
+ * A migration transforms a value during decoding. It returns a `Validation` like any
+ * io-ts validator, but may additionally push non-fatal warnings through the
+ * `warn` callback; pushed warnings accumulate on the independent warning channel
+ * and never make the result a `Left`.
+ *
+ * @category Codec
+ * @since 2.2.23
+ */
+export type Migrate<I, A> = (i: I, context: Context, warn: (message: string) => void) => Validation<A>
+
+/**
+ * @category Codec
+ * @since 2.2.23
+ */
+export class MigrationType<A, O = A, I = unknown> extends Type<A, O, I> {
+  /**
+   * @since 2.2.23
+   */
+  readonly _tag: 'MigrationType' = 'MigrationType'
+  constructor(
+    name: string,
+    is: Is<A>,
+    validate: Validate<I, A>,
+    encode: Encode<A, O>,
+    readonly type: Type<A, O, I>,
+    readonly migrate: Migrate<I, A>
+  ) {
+    super(name, is, validate, encode)
+  }
+}
+
+/**
+ * Holds the per-decode warning accumulator. The map is keyed by the root
+ * {@link ContextEntry} of a decode run: every `appendContext` keeps the same root
+ * entry object, so nested fields reach the exact accumulator of their decode run.
+ * Because each run starts from a fresh root entry, two `decode` calls can never
+ * share the same warnings array.
+ *
+ * @internal
+ */
+const warningChannels: WeakMap<ContextEntry, Array<DecodeWarning>> = new WeakMap()
+
+/**
+ * Returns the warnings channel for the given context, if the context belongs to a
+ * decode run started with {@link decodeWithWarnings}.
+ *
+ * @internal
+ */
+const getWarningChannel = (c: Context): Array<DecodeWarning> | undefined =>
+  c.length > 0 ? warningChannels.get(c[0]) : undefined
+
+/**
+ * Builds the `/`-joined path of a (sub)context, e.g. `['', 'address', 'street']`
+ * becomes `address/street`.
+ *
+ * @internal
+ */
+const getContextPath = (c: Context): string =>
+  c
+    .map((entry) => entry.key)
+    .filter((key) => key.length > 0)
+    .join('/')
+
+/**
+ * A codec composition helper that runs `migrate` during decoding.
+ *
+ * - on success the warnings emitted through `warn` accumulate on the independent
+ *   warning channel (see {@link decodeWithWarnings}); nested fields carry their path
+ * - a warning is never a `Left`: decode failures still return the original `Errors`
+ * - the encoding direction keeps delegating to the wrapped codec (`encode` is
+ *   unchanged) and no warning object is attached to the encoded output
+ *
+ * @category combinators
+ * @since 2.2.23
+ */
+export function withMigrations<A, O, I>(
+  codec: Type<A, O, I>,
+  migrate: Migrate<I, A>,
+  name: string = codec.name
+): MigrationType<A, O, I> {
+  return new MigrationType(
+    name,
+    codec.is,
+    (i, c) => {
+      const channel = getWarningChannel(c)
+      const warn = (message: string): void => {
+        if (channel !== undefined) {
+          channel.push({ path: getContextPath(c), message })
+        }
+      }
+      return migrate(i, c, warn)
+    },
+    codec.encode,
+    codec,
+    migrate
+  )
+}
+
+/**
+ * Decodes `i` with `codec` on an independent warning channel.
+ *
+ * The returned warnings array is created for this call only and is never shared
+ * with another decode run. On failure the `Either` carries the original `Errors`
+ * and the warnings accumulated before the failure are returned as well.
+ *
+ * @category Codec
+ * @since 2.2.23
+ */
+export function decodeWithWarnings<A, O, I>(
+  codec: Type<A, O, I>,
+  i: I
+): { readonly result: Validation<A>; readonly warnings: Array<DecodeWarning> } {
+  const warnings: Array<DecodeWarning> = []
+  const rootEntry: ContextEntry = { key: '', type: codec, actual: i }
+  warningChannels.set(rootEntry, warnings)
+  return { result: codec.validate(i, [rootEntry]), warnings }
+}
+
+// -------------------------------------------------------------------------------------
 // utils
 // -------------------------------------------------------------------------------------
 
